@@ -1,0 +1,23 @@
+{
+  "name": "invcompress_0.0032",
+  "description": "Inference (ans)",
+  "results": {
+    "psnr-rgb": [
+      27.98111948084085
+    ],
+    "ms-ssim-rgb": [
+      0.9784537454446157
+    ],
+    "bpp": [
+      0.2596672905815972
+    ],
+    "encoding_time": [
+      4.513165990511577
+    ],
+    "decoding_time": [
+      8.767163187265396
+    ]
+  }
+}
+
+

@@ -1,0 +1,31 @@
+{
+  "name": "stf_ms-ssim",
+  "description": "Inference (ans)",
+  "results": {
+    "psnr-rgb": [
+
+    ],
+    "ms-ssim-db-rgb": [
+    13.63,
+    14.96,
+    16.49,
+    18.17,
+    20.19,
+    21.50
+    ],
+    "bpp": [
+    0.109,
+    0.168,
+    0.236,
+    0.340,
+    0.483,
+    0.664
+    ],
+    "encoding_time": [
+
+    ],
+    "decoding_time": [
+
+    ]
+  }
+}
