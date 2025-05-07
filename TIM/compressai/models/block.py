@@ -71,80 +71,92 @@ class Block(nn.Module):
         return x
 
     class WMSA(nn.Module):
-        """ Self-attention module in Swin Transformer
+    """ Self-attention module in Swin Transformer
+    """
+
+    def __init__(self, input_dim, output_dim, head_dim, window_size, type):
+        super(WMSA, self).__init__()
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.head_dim = head_dim
+        self.scale = self.head_dim ** -0.5
+        self.n_heads = input_dim//head_dim
+        self.window_size = window_size
+        self.type=type
+        self.embedding_layer = nn.Linear(self.input_dim, 3*self.input_dim, bias=True)
+        self.relative_position_params = nn.Parameter(torch.zeros((2 * window_size - 1)*(2 * window_size -1), self.n_heads))
+        self.logit_scale = nn.Parameter(torch.log(10 * torch.ones((self.n_heads, 1, 1))), requires_grad=True)
+        self.linear = nn.Linear(self.input_dim, self.output_dim)
+        self.q_bias = nn.Parameter(torch.zeros(self.input_dim))
+        self.v_bias = nn.Parameter(torch.zeros(self.input_dim))
+        self.qkv = nn.Linear(self.input_dim, self.input_dim * 3, bias=False)
+        trunc_normal_(self.relative_position_params, std=.02)
+        self.relative_position_params = torch.nn.Parameter(self.relative_position_params.view(2*window_size-1, 2*window_size-1, self.n_heads).transpose(1,2).transpose(0,1))
+
+    def generate_mask(self, h, w, p, shift):
+        """ generating the mask of SW-MSA
+        Args:
+            shift: shift parameters in CyclicShift.
+        Returns:
+            attn_mask: should be (1 1 w p p),
         """
-
-        def __init__(self, input_dim, output_dim, head_dim, window_size, type):
-            super(WMSA, self).__init__()
-            self.input_dim = input_dim
-            self.output_dim = output_dim
-            self.head_dim = head_dim
-            self.scale = self.head_dim ** -0.5
-            self.n_heads = input_dim // head_dim
-            self.window_size = window_size
-            self.type = type
-            self.embedding_layer = nn.Linear(self.input_dim, 3 * self.input_dim, bias=True)
-            self.relative_position_params = nn.Parameter(
-                torch.zeros((2 * window_size - 1) * (2 * window_size - 1), self.n_heads))
-
-            self.linear = nn.Linear(self.input_dim, self.output_dim)
-
-            trunc_normal_(self.relative_position_params, std=.02)
-            self.relative_position_params = torch.nn.Parameter(
-                self.relative_position_params.view(2 * window_size - 1, 2 * window_size - 1, self.n_heads).transpose(1,
-                                                                                                                     2).transpose(
-                    0, 1))
-
-        def generate_mask(self, h, w, p, shift):
-            """ generating the mask of SW-MSA
-            Args:
-                shift: shift parameters in CyclicShift.
-            Returns:
-                attn_mask: should be (1 1 w p p),
-            """
-            attn_mask = torch.zeros(h, w, p, p, p, p, dtype=torch.bool, device=self.relative_position_params.device)
-            if self.type == 'W':
-                return attn_mask
-
-            s = p - shift
-            attn_mask[-1, :, :s, :, s:, :] = True
-            attn_mask[-1, :, s:, :, :s, :] = True
-            attn_mask[:, -1, :, :s, :, s:] = True
-            attn_mask[:, -1, :, s:, :, :s] = True
-            attn_mask = rearrange(attn_mask, 'w1 w2 p1 p2 p3 p4 -> 1 1 (w1 w2) (p1 p2) (p3 p4)')
+        attn_mask = torch.zeros(h, w, p, p, p, p, dtype=torch.bool, device=self.relative_position_params.device)
+        if self.type == 'W':
             return attn_mask
 
-        def forward(self, x):
-            """ Forward pass of Window Multi-head Self-attention module.
-            Args:
-                x: input tensor with shape of [b h w c];
-                attn_mask: attention mask, fill -inf where the value is True;
-            Returns:
-                output: tensor shape [b h w c]
-            """
-            if self.type != 'W': x = torch.roll(x, shifts=(-(self.window_size // 2), -(self.window_size // 2)),
-                                                dims=(1, 2))
-            x = rearrange(x, 'b (w1 p1) (w2 p2) c -> b w1 w2 p1 p2 c', p1=self.window_size, p2=self.window_size)
-            h_windows = x.size(1)
-            w_windows = x.size(2)
-            x = rearrange(x, 'b w1 w2 p1 p2 c -> b (w1 w2) (p1 p2) c', p1=self.window_size, p2=self.window_size)
-            qkv = self.embedding_layer(x)
-            q, k, v = rearrange(qkv, 'b nw np (threeh c) -> threeh b nw np c', c=self.head_dim).chunk(3, dim=0)
-            sim = torch.einsum('hbwpc,hbwqc->hbwpq', q, k) * self.scale
-            sim = sim + rearrange(self.relative_embedding(), 'h p q -> h 1 1 p q')
-            if self.type != 'W':
-                attn_mask = self.generate_mask(h_windows, w_windows, self.window_size, shift=self.window_size // 2)
-                sim = sim.masked_fill_(attn_mask, float("-inf"))
+        s = p - shift
+        attn_mask[-1, :, :s, :, s:, :] = True
+        attn_mask[-1, :, s:, :, :s, :] = True
+        attn_mask[:, -1, :, :s, :, s:] = True
+        attn_mask[:, -1, :, s:, :, :s] = True
+        attn_mask = rearrange(attn_mask, 'w1 w2 p1 p2 p3 p4 -> 1 1 (w1 w2) (p1 p2) (p3 p4)')
+        return attn_mask
 
-            probs = nn.functional.softmax(sim, dim=-1)
-            output = torch.einsum('hbwij,hbwjc->hbwic', probs, v)
-            output = rearrange(output, 'h b w p c -> b w p (h c)')
-            output = self.linear(output)
-            output = rearrange(output, 'b (w1 w2) (p1 p2) c -> b (w1 p1) (w2 p2) c', w1=h_windows, p1=self.window_size)
+    def forward(self, x):
+        """ Forward pass of Window Multi-head Self-attention module.
+        Args:
+            x: input tensor with shape of [b h w c];
+            attn_mask: attention mask, fill -inf where the value is True;
+        Returns:
+            output: tensor shape [b h w c]
+        """
+        if self.type!='W': x = torch.roll(x, shifts=(-(self.window_size//2), -(self.window_size//2)), dims=(1,2))
+        x = rearrange(x, 'b (w1 p1) (w2 p2) c -> b w1 w2 p1 p2 c', p1=self.window_size, p2=self.window_size)
+        h_windows = x.size(1)
+        w_windows = x.size(2)
+        x = rearrange(x, 'b w1 w2 p1 p2 c -> b (w1 w2) (p1 p2) c', p1=self.window_size, p2=self.window_size)
+        qkv_bias = None
+        if self.q_bias is not None:
+            qkv_bias = torch.cat((self.q_bias, torch.zeros_like(self.v_bias, requires_grad=False), self.v_bias))
+        qkv = F.linear(input=x, weight=self.qkv.weight, bias=qkv_bias)
+        # qkv = self.embedding_layer(x)
+        q, k, v = rearrange(qkv, 'b nw np (threeh c) -> threeh b nw np c', c=self.head_dim).chunk(3, dim=0)
+        device = next(self.parameters()).device
+        logit_scale = torch.clamp(
+            self.logit_scale,
+            max=torch.log(torch.tensor(1. / 0.01, device=device))
+        ).exp()
+        # logit_scale = torch.clamp(self.logit_scale, max=torch.log(torch.tensor(1. / 0.01))).exp()
+        logit_scale = logit_scale.unsqueeze(-1).unsqueeze(-1)
+        sim = torch.einsum('hbwpc,hbwqc->hbwpq', q, k) * logit_scale
+        sim = sim + rearrange(self.relative_embedding(), 'h p q -> h 1 1 p q')
+        if self.type != 'W':
+            attn_mask = self.generate_mask(h_windows, w_windows, self.window_size, shift=self.window_size//2)
+            sim = sim.masked_fill_(attn_mask, float("-inf"))
 
-            if self.type != 'W': output = torch.roll(output, shifts=(self.window_size // 2, self.window_size // 2),
-                                                     dims=(1, 2))
-            return output
+        probs = nn.functional.softmax(sim, dim=-1)
+        output = torch.einsum('hbwij,hbwjc->hbwic', probs, v)
+        output = rearrange(output, 'h b w p c -> b w p (h c)')
+        output = self.linear(output)
+        output = rearrange(output, 'b (w1 w2) (p1 p2) c -> b (w1 p1) (w2 p2) c', w1=h_windows, p1=self.window_size)
+
+        if self.type!='W': output = torch.roll(output, shifts=(self.window_size//2, self.window_size//2), dims=(1,2))
+        return output
+
+    def relative_embedding(self):
+        cord = torch.tensor(np.array([[i, j] for i in range(self.window_size) for j in range(self.window_size)]))
+        relation = cord[:, None, :] - cord[None, :, :] + self.window_size -1
+        return self.relative_position_params[:, relation[:,:,0].long(), relation[:,:,1].long()]
 
     def relative_embedding(self):
         cord = torch.tensor(np.array([[i, j] for i in range(self.window_size) for j in range(self.window_size)]))
